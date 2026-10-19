@@ -1,6 +1,6 @@
 # Notle
 
-Not Only Type LEss. 把说出口的想法变成清晰文字。支持浏览器录音、云端转写、去口水词、三种整理风格及本机文字历史。
+Not Only Type LEss. 把说出口的想法变成清晰文字。支持浏览器录音、云端转写、去口水词、三种整理风格、个人热词词典及本机文字历史。
 
 Rust 负责 AI 调用、校验、业务和存储；原生 TypeScript 负责浏览器录音和界面，不依赖前端 UI 框架。
 
@@ -24,6 +24,14 @@ cargo run --locked
 录音每段最长 10 分钟、最大 25 MB；达到录音限制会自动停止。也可导入 25 MB 以内的 WebM、MP4、M4A、MP3、WAV、OGG。导入文件不限制时长，云端服务可能另有限制。浏览器录音需 localhost 或 HTTPS，主流新版 Chrome、Edge、Safari 可用，实际支持的录音容器由浏览器协商决定。
 
 原始转写先保存，AI 整理失败后可单独重试。如果转写请求失败，音频仍保留在当前页面，可下载或重新提交。**未提交的录音不会跨页面刷新保存**；刷新或关闭页面前请下载原始录音。
+
+## 热词词典
+
+从侧栏进入「热词词典」，添加标准写法（例如 `Notle`）和常见误识别（例如 `诺特、诺特尔`）。可搜索、编辑、删除或停用词条；最多 100 个词，每词最多 10 个别名，每项最多 80 字。标准写法和别名不能与其他词条冲突，停用词条也保留其写法，避免启用后产生歧义。
+
+启用词条会在转写时作为术语提示发给模型，整理时纠正别名并统一大小写。转写提示最多 1000 字，超出部分不加入识别提示，但仍用于文字整理。英文按单词边界匹配，重叠别名优先匹配最长写法，单次替换不级联。原始转写不被覆盖。热词提示不能保证模型一定识别正确；只有真实出现的内容才应整理为热词。
+
+热词与历史共存于同一数据文件，旧版只有 records 字段的数据文件可直接读取。请仅将常见的误识别写法设为别名，过于宽泛的别名可能改变其他语句中的文字。
 
 ## 开发与验证
 
@@ -53,7 +61,7 @@ npm run build
 PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright node scripts/browser-smoke.mjs
 ```
 
-测试在 3001 端口启动独立服务与临时数据目录，使用浏览器模拟麦克风及本地 AI 替身，覆盖录音、回放、真实 Rust 上传链路、重试、复制、历史搜索、Key 不落盘和移动端布局。截图输出到 `.notle/qa-artifacts/`。它验证协议与交互，**不验证真实云端识别准确率**。运行测试前请确保端口 3001 未被占用。
+测试在系统分配的空闲端口启动独立服务与临时数据目录，使用浏览器模拟麦克风及本地 AI 替身，覆盖录音、回放、真实 Rust 上传链路、重试、复制、历史搜索、Key 不落盘、热词增改和启停、麦克风拒绝恢复及移动端布局。截图输出到 `.notle/qa-artifacts/`。它验证协议与交互，**不验证真实云端识别准确率**。测试不会操作日常使用的历史记录。
 
 ## 数据与配置
 
@@ -68,6 +76,8 @@ API Key 只存在于当前页面内存和处理请求的服务内存中，不进
 
 ## 目录
 
+- `src/hotwords.rs`：热词校验、识别提示和别名纠正
+- `web/hotwords.ts`：热词管理页面
 - `src/provider.rs`：转写、文字整理和云端错误处理
 - `src/lib.rs`：API、上传限制及来源校验
 - `src/store.rs`：本地记录持久化
@@ -76,5 +86,7 @@ API Key 只存在于当前页面内存和处理请求的服务内存中，不进
 - `tests/pipeline.rs`：Rust HTTP 集成测试
 
 API：`GET /api/state`、`POST /api/transcriptions`（multipart：audio、config、style、durationMs）、`POST /api/records/{id}/rewrite`、`DELETE /api/records/{id}`。config 为 baseUrl、apiKey、transcriptionModel、rewriteModel、language；style 为 natural、paragraphs、bullets。
+
+热词 API：`POST /api/hotwords`、`PUT /api/hotwords/{id}`、`DELETE /api/hotwords/{id}`；输入为 term、aliases、enabled。`GET /api/state` 同时返回 records 和 hotwords。
 
 接口依据：[文件转写](https://developers.openai.com/api/docs/guides/speech-to-text)、[Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。

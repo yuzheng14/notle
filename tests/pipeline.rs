@@ -23,13 +23,19 @@ struct Mock {
 }
 async fn transcribe(mut body: Multipart) -> Json<Value> {
     let mut fields = Vec::new();
+    let mut has_prompt = false;
     while let Some(field) = body.next_field().await.unwrap() {
         fields.push(field.name().unwrap().to_owned());
-        let _ = field.bytes().await.unwrap();
+        if field.name() == Some("prompt") {
+            has_prompt = field.text().await.unwrap().contains("Notle");
+        } else {
+            let _ = field.bytes().await.unwrap();
+        }
     }
     assert!(fields.contains(&"file".to_owned()));
     assert!(fields.contains(&"model".to_owned()));
-    Json(json!({"text":"嗯，今天不开会，下周二再确认 3 个方案。"}))
+    assert!(has_prompt);
+    Json(json!({"text":"嗯，诺特尔今天不开会，下周二再确认 3 个方案。"}))
 }
 async fn rewrite(
     State(mock): State<Mock>,
@@ -56,7 +62,7 @@ async fn rewrite(
         (
             axum::http::StatusCode::OK,
             Json(
-                json!({"choices":[{"message":{"content":"今天不开会，下周二再确认 3 个方案。"},"finish_reason":"stop"}]}),
+                json!({"choices":[{"message":{"content":"诺特尔今天不开会，下周二再确认 3 个方案。"},"finish_reason":"stop"}]}),
             ),
         )
     }
@@ -100,6 +106,23 @@ async fn raw_transcript_survives_failed_rewrite_and_can_be_retried() {
     ))
     .await;
     let client = Client::new();
+    let word: Value = client
+        .post(format!("{base}/api/hotwords"))
+        .json(&json!({"term":"Notle", "aliases":["诺特", "诺特尔"], "enabled":true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(word["term"], "Notle");
+    let collision = client
+        .post(format!("{base}/api/hotwords"))
+        .json(&json!({"term":"Other", "aliases":["notle"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(collision.status(), 400);
     let config = json!({"baseUrl":format!("{upstream}/v1"),"apiKey":"DO-NOT-LEAK-secret-key","transcriptionModel":"whisper-1","rewriteModel":"mock","language":"zh"});
     let form = Form::new()
         .part(
@@ -136,7 +159,8 @@ async fn raw_transcript_survives_failed_rewrite_and_can_be_retried() {
         .unwrap();
     assert!(retry.status().is_success());
     let rewritten: Record = retry.json().await.unwrap();
-    assert!(rewritten.polished.unwrap().contains("今天不开会"));
+    assert!(rewritten.polished.unwrap().contains("Notle今天不开会"));
+    assert!(rewritten.original.contains("诺特尔"));
     assert!(rewritten.warning.is_none());
     assert_eq!(store.snapshot().await.records.len(), 1);
     let foreign = client
@@ -146,6 +170,13 @@ async fn raw_transcript_survives_failed_rewrite_and_can_be_retried() {
         .await
         .unwrap();
     assert_eq!(foreign.status(), 403);
+    let foreign_host = client
+        .get(format!("{base}/api/state"))
+        .header("Host", "untrusted.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_host.status(), 403);
     let state = client
         .get(format!("{base}/api/state"))
         .send()
@@ -166,6 +197,28 @@ async fn raw_transcript_survives_failed_rewrite_and_can_be_retried() {
         .unwrap();
     assert_eq!(deleted.status(), 204);
     assert!(store.snapshot().await.records.is_empty());
+    let disabled = client
+        .put(format!(
+            "{base}/api/hotwords/{}",
+            word["id"].as_str().unwrap()
+        ))
+        .json(&json!({"term":"Notle","aliases":["诺特尔"],"enabled":false}))
+        .send()
+        .await
+        .unwrap();
+    assert!(disabled.status().is_success());
+    let reloaded = Store::open(path.clone()).await.unwrap().snapshot().await;
+    assert!(!reloaded.hotwords[0].enabled);
+    let deleted_word = client
+        .delete(format!(
+            "{base}/api/hotwords/{}",
+            word["id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted_word.status(), 204);
+    assert!(store.snapshot().await.hotwords.is_empty());
     task.abort();
     mock_task.abort();
     tokio::fs::remove_dir_all(directory).await.unwrap();
@@ -184,4 +237,10 @@ async fn corrupt_storage_is_not_silently_reset() {
     assert!(Store::open(path.clone()).await.is_err());
     assert_eq!(tokio::fs::read(&path).await.unwrap(), b"not-json");
     tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[test]
+fn pre_hotword_data_files_remain_readable() {
+    let old: notle::model::Database = serde_json::from_str(r#"{"records":[]}"#).unwrap();
+    assert!(old.hotwords.is_empty());
 }

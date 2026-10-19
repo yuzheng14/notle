@@ -55,4 +55,6 @@ pub fn now_ms() -> u64 {
 #[serde(rename_all = "camelCase")]
 pub struct Database {
     pub records: Vec<Record>,
+    #[serde(default)]
+    pub hotwords: Vec<crate::hotwords::Hotword>,
 }

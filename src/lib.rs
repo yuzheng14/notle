@@ -1,4 +1,5 @@
 pub mod error;
+pub mod hotwords;
 pub mod model;
 pub mod provider;
 pub mod store;
@@ -36,6 +37,11 @@ pub struct AppState {
 pub fn router(state: AppState, web_root: PathBuf, allowed_origins: Vec<String>) -> Router {
     let api = Router::new()
         .route("/state", get(snapshot))
+        .route("/hotwords", post(create_hotword))
+        .route(
+            "/hotwords/{id}",
+            axum::routing::put(update_hotword).delete(delete_hotword),
+        )
         .route("/transcriptions", post(transcribe))
         .route("/records/{id}", axum::routing::delete(delete_record))
         .route("/records/{id}/rewrite", post(rewrite_record))
@@ -69,6 +75,27 @@ pub fn router(state: AppState, web_root: PathBuf, allowed_origins: Vec<String>) 
         .layer(middleware::from_fn(security_headers))
 }
 async fn security_headers(request: Request, next: Next) -> Response {
+    // This is a local personal service. Reject foreign Host headers as well as
+    // foreign Origins so a rebinding domain cannot read local history/hotwords.
+    let local_host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|host| reqwest::Url::parse(&format!("http://{host}")).ok())
+        .is_some_and(|url| {
+            matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.username().is_empty()
+                && url.password().is_none()
+        });
+    if !local_host {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error":"仅允许通过 localhost 或 127.0.0.1 访问。"})),
+        )
+            .into_response();
+    }
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         "x-content-type-options",
@@ -165,9 +192,10 @@ async fn transcribe(
     }
     let config = config.ok_or_else(|| AppError::bad("缺少 AI 配置。"))?;
     let (bytes, mime, filename) = audio.ok_or_else(|| AppError::bad("请先录音或上传音频。"))?;
+    let hotwords = state.store.snapshot().await.hotwords;
     let original = state
         .provider
-        .transcribe(&config, bytes, &mime, &filename)
+        .transcribe(&config, bytes, &mime, &filename, &hotwords)
         .await?;
     let mut record = Record {
         id: format!(
@@ -186,7 +214,7 @@ async fn transcribe(
     state.store.save_record(record.clone()).await?;
     match state
         .provider
-        .rewrite(&config, &record.original, style)
+        .rewrite(&config, &record.original, style, &hotwords)
         .await
     {
         Ok(text) => record.polished = Some(text),
@@ -216,14 +244,36 @@ async fn rewrite_record(
         .into_iter()
         .find(|item| item.id == id)
         .ok_or_else(AppError::missing)?;
+    let hotwords = state.store.snapshot().await.hotwords;
     record.polished = Some(
         state
             .provider
-            .rewrite(&input.config, &record.original, input.style)
+            .rewrite(&input.config, &record.original, input.style, &hotwords)
             .await?,
     );
     record.style = input.style;
     record.warning = None;
     state.store.save_record(record.clone()).await?;
     Ok(Json(record))
+}
+
+async fn create_hotword(
+    State(state): State<AppState>,
+    Json(input): Json<hotwords::HotwordInput>,
+) -> Result<Json<hotwords::Hotword>, AppError> {
+    Ok(Json(state.store.put_hotword(None, input).await?))
+}
+async fn update_hotword(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<hotwords::HotwordInput>,
+) -> Result<Json<hotwords::Hotword>, AppError> {
+    Ok(Json(state.store.put_hotword(Some(&id), input).await?))
+}
+async fn delete_hotword(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.store.delete_hotword(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
