@@ -49,6 +49,46 @@ impl Store {
         *guard = next;
         Ok(())
     }
+    pub async fn put_hotword(
+        &self,
+        id: Option<&str>,
+        input: crate::hotwords::HotwordInput,
+    ) -> Result<crate::hotwords::Hotword, AppError> {
+        let mut guard = self.data.lock().await;
+        if let Some(id) = id {
+            if !guard.hotwords.iter().any(|word| word.id == id) {
+                return Err(AppError::missing());
+            }
+        } else if guard.hotwords.len() >= 100 {
+            return Err(AppError::bad("最多保存 100 个热词。"));
+        }
+        let input = input.validate(&guard.hotwords, id)?;
+        let word = crate::hotwords::Hotword {
+            id: id
+                .map(str::to_owned)
+                .unwrap_or_else(crate::hotwords::new_id),
+            term: input.term,
+            aliases: input.aliases,
+            enabled: input.enabled,
+        };
+        let mut next = guard.clone();
+        next.hotwords.retain(|item| item.id != word.id);
+        next.hotwords.push(word.clone());
+        self.persist(&next).await?;
+        *guard = next;
+        Ok(word)
+    }
+    pub async fn delete_hotword(&self, id: &str) -> Result<(), AppError> {
+        let mut guard = self.data.lock().await;
+        let mut next = guard.clone();
+        next.hotwords.retain(|item| item.id != id);
+        if next.hotwords.len() == guard.hotwords.len() {
+            return Err(AppError::missing());
+        }
+        self.persist(&next).await?;
+        *guard = next;
+        Ok(())
+    }
     pub async fn delete_record(&self, id: &str) -> Result<(), AppError> {
         let mut guard = self.data.lock().await;
         let mut next = guard.clone();

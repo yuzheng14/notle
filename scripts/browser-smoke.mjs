@@ -14,6 +14,7 @@ const provider = createServer(async (request, response) => {
   response.setHeader('Content-Type', 'application/json');
   if (request.url === '/v1/audio/transcriptions') {
     assert.match(body, /recording|notle/);
+    assert.match(body, /Notle/);
     response.end(JSON.stringify({ text: '嗯，那个，我们下周先做用户访谈，然后整理反馈。周五之前交第一版方案，不要直接开始开发。' }));
   } else if (request.url === '/v1/chat/completions') {
     const parsed = JSON.parse(body); assert.match(parsed.messages[1].content, /不要直接开始开发/);
@@ -23,23 +24,44 @@ const provider = createServer(async (request, response) => {
 await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
 const port = provider.address().port;
 const dataDirectory = `.notle/browser-qa-${process.pid}`;
-const app = spawn('target/debug/notle', { env: { ...process.env, NOTLE_PORT: '3001', NOTLE_DATA_DIR: dataDirectory }, stdio: 'pipe' });
+const app = spawn('target/debug/notle', { env: { ...process.env, NOTLE_PORT: '0', NOTLE_DATA_DIR: dataDirectory }, stdio: 'pipe' });
 let browser;
 try {
-  for (let attempt = 0; attempt < 50; attempt++) {
-    try { if ((await fetch('http://127.0.0.1:3001/api/state')).ok) break; } catch {}
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
+  const applicationURL = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('The isolated Rust server did not start.')), 10000);
+    app.once('error', error => { clearTimeout(timer); reject(error); });
+    app.once('exit', code => { clearTimeout(timer); reject(new Error(`The isolated Rust server exited (${code}).`)); });
+    app.stdout.on('data', chunk => {
+      const match = chunk.toString().match(/Notle is ready at (http:\/\/localhost:\d+)/);
+      if (match) { clearTimeout(timer); resolve(match[1]); }
+    });
+  });
   browser = await chromium.launch({ headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
   const context = await browser.newContext({ viewport: { width: 1280, height: 980 }, permissions: ['microphone', 'clipboard-read', 'clipboard-write'] });
   const page = await context.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.message));
-  await page.goto('http://localhost:3001');
+  await page.goto(applicationURL);
   await page.getByRole('heading', { name: '说出来，就有条理。' }).waitFor();
   await page.screenshot({ path: `${artifacts}/workspace.png`, fullPage: true });
   await page.getByRole('button', { name: '体验一段示例' }).click();
   assert.match(await page.getByLabel('整理结果，可编辑后复制').inputValue(), /不用急着开发/);
   await page.screenshot({ path: `${artifacts}/comparison.png`, fullPage: true });
+  await page.getByRole('button', { name: '热词词典', exact: true }).click();
+  await page.getByRole('button', { name: '添加热词', exact: false }).click();
+  await page.getByLabel('标准写法').fill('Notle');
+  await page.getByLabel('常见误识别（可选）').fill('诺特，诺特尔');
+  await page.getByRole('button', { name: '保存热词' }).click();
+  await page.getByText('Notle', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '编辑 Notle', exact: true }).click();
+  await page.getByLabel('常见误识别（可选）').fill('诺特，诺特尔，notel');
+  await page.getByRole('button', { name: '保存热词' }).click();
+  await page.getByText('notel', { exact: true }).waitFor();
+  await page.getByLabel('启用 Notle', { exact: true }).uncheck();
+  await page.getByText('0 个已启用 / 1 个热词').waitFor();
+  await page.getByLabel('启用 Notle', { exact: true }).check();
+  await page.getByText('1 个已启用 / 1 个热词').waitFor();
+  await page.screenshot({ path: `${artifacts}/hotwords.png`, fullPage: true });
+  await page.getByRole('button', { name: '录音工作台', exact: true }).click();
   await page.getByRole('button', { name: 'AI 设置' }).click();
   await page.getByLabel('API 地址').fill(`http://127.0.0.1:${port}/v1`);
   await page.getByLabel('API Key').fill('local-test-key');
@@ -72,8 +94,18 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: `${artifacts}/mobile.png`, fullPage: true });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.getByRole('button', { name: '热词词典', exact: true }).click();
+  await page.screenshot({ path: `${artifacts}/hotwords-mobile.png`, fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  const denied = await context.newPage();
+  await denied.addInitScript(() => { navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Test denied', 'NotAllowedError'); }; });
+  await denied.goto(applicationURL);
+  await denied.getByRole('button', { name: '开始录音', exact: true }).click();
+  await denied.getByText('麦克风访问被拒绝，请在浏览器地址栏的权限设置中允许录音。').waitFor();
+  assert.equal(await denied.getByRole('button', { name: '开始录音', exact: true }).isEnabled(), true);
+  await denied.close();
   assert.deepEqual(errors, []);
-  console.log('PASS: real browser MediaRecorder, audio preview, Rust upload → stub provider → saved result, rewrite, copy, history search, key privacy, mobile layout.');
+  console.log('PASS: real browser MediaRecorder, audio preview, Rust upload → stub provider → saved result, rewrite, copy, history search, key privacy, hotword CRUD/toggle, microphone denial, mobile layout.');
 } finally {
   await browser?.close(); app.kill('SIGTERM');
   await new Promise(resolve => provider.close(resolve));

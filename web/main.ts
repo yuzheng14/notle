@@ -3,32 +3,17 @@ import type { ApiConfig, AudioTake, Database, NoteRecord, Style } from './types'
 import { loadState, transcribe, rewrite, deleteRecord } from './api';
 import { Recorder } from './recorder';
 
-const icons: Record<string, string> = {
-  mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/>',
-  grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
-  history: '<path d="M3 11a9 9 0 1 1 2 7M3 4v7h7M12 7v5l3 2"/>',
-  settings: '<path d="M4 7h16M4 17h16M8 4v6M16 14v6"/>',
-  arrow: '<path d="M4 12h16M14 6l6 6-6 6"/>',
-  upload: '<path d="M12 16V3M7 8l5-5 5 5M4 16v5h16v-5"/>',
-  sparkle: '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5ZM20 2v4M18 4h4"/>',
-  copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
-  download: '<path d="M12 3v13M7 11l5 5 5-5M4 17v4h16v-4"/>',
-  close: '<path d="m6 6 12 12M6 18 18 6"/>',
-  check: '<path d="m5 12 4 4 10-10"/>',
-  shield: '<path d="m12 2 8 3v6c0 6-8 11-8 11S4 17 4 11V5ZM8 12l3 3 5-6"/>',
-  trash: '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/>',
-  file: '<path d="M14 2H5v20h14V7ZM14 2v6h5M8 12h8M8 16h6"/>',
-};
-export const icon = (name: string, extra = '') => `<svg class="icon ${extra}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.file}</svg>`;
-export const escapeHTML = (text: string) => text.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
+import { icon, escapeHTML } from './ui';
+import { renderHotwords } from './hotwords';
+
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
 const formatTime = (ms: number) => `${String(Math.floor(ms / 60000)).padStart(2, '0')}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
 const styles: Record<Style, string> = { natural: '自然表达', paragraphs: '清晰分段', bullets: '要点列表' };
-let database: Database = { records: [] };
+let database: Database = { records: [], hotwords: [] };
 let selected: NoteRecord | undefined;
 let take: AudioTake | undefined;
 let style: Style = 'natural';
-let view: 'workspace' | 'history' = 'workspace';
+let view: 'workspace' | 'history' | 'hotwords' = 'workspace';
 let busy = false;
 let isDemo = false;
 let elapsed = 0;
@@ -51,6 +36,7 @@ $('#app').innerHTML = `
     <nav class="navigation" aria-label="主导航">
       <button id="nav-workspace" class="nav-item active" aria-label="录音工作台">${icon('grid')}<span>录音工作台</span><span class="nav-key">⌘ 1</span></button>
       <button id="nav-history" class="nav-item" aria-label="转写记录">${icon('history')}<span>转写记录</span><span id="history-count" class="count">0</span></button>
+      <button id="nav-hotwords" class="nav-item" aria-label="热词词典">${icon('book')}<span>热词词典</span><span id="hotword-count" class="count">0</span></button>
     </nav>
     <div class="sidebar-bottom"><div class="local-badge">${icon('shield')}<span>文字保存在本机</span></div><p>少一点打字<br>多一点自由表达。</p><span class="version">NOTLE / V0.1</span></div>
   </aside>
@@ -82,6 +68,7 @@ export function toast(message: string, error = false) {
 function changeView(next: typeof view) { if (busy || recorder.state !== 'idle') return; view = next; renderContent(); }
 $('#nav-workspace').onclick = () => changeView('workspace');
 $('#nav-history').onclick = () => changeView('history');
+$('#nav-hotwords').onclick = () => changeView('hotwords');
 $('.brand').onclick = event => { event.preventDefault(); changeView('workspace'); };
 function openSettings() {
   const form = $('#settings-form') as HTMLFormElement;
@@ -108,8 +95,13 @@ function updateConfig() { $('#config-dot').classList.toggle('ready', !!config.ap
 function requireConfig(): boolean { if (config.apiKey) return true; openSettings(); return false; }
 
 function renderContent() {
-  $('#page-title').textContent = view === 'workspace' ? '录音工作台' : '转写记录';
+  $('#page-title').textContent = view === 'workspace' ? '录音工作台' : view === 'history' ? '转写记录' : '热词词典';
   $('#nav-workspace').classList.toggle('active', view === 'workspace'); $('#nav-history').classList.toggle('active', view === 'history');
+  $('#nav-hotwords').classList.toggle('active', view === 'hotwords');
+  $('#hotword-count').textContent = String(database.hotwords.filter(word => word.enabled).length);
+  if (view === 'hotwords') {
+    renderHotwords(database.hotwords, async () => { await refreshState(); renderContent(); }, toast); updateConfig(); return;
+  }
   $('#history-count').textContent = String(database.records.length);
   $('#content').innerHTML = view === 'workspace' ? workspaceHTML() : historyHTML();
   if (view === 'workspace') bindWorkspace(); else bindHistory();
@@ -125,6 +117,7 @@ function workspaceHTML() {
     <div class="recording-bottom"><span>每段最长 10 分钟 · 最大 25 MB</span><button id="upload-button" class="text-button">${icon('upload')} 导入音频</button><input id="audio-file" type="file" accept="audio/*,video/webm,video/mp4,.m4a" hidden /></div>
   </section>
   <section class="flow-controls"><div><div class="control-label">整理成你需要的样子</div><div class="style-options" role="group" aria-label="整理风格">${Object.entries(styles).map(([value, label]) => `<button data-style="${value}" class="style-option ${style === value ? 'selected' : ''}" aria-pressed="${style === value}">${value === 'natural' ? icon('sparkle') : value === 'paragraphs' ? icon('file') : '<span class="list-icon">☷</span>'}${label}</button>`).join('')}</div></div><button id="process-button" class="button primary process-button" ${!take || busy ? 'disabled' : ''}>${icon('sparkle')}<span>${busy ? '正在转写并整理…' : '转写并整理'}</span>${icon('arrow')}</button></section>
+  <div class="hotword-hint">${icon('book')}<span>${database.hotwords.some(word => word.enabled) ? `${database.hotwords.filter(word => word.enabled).length} 个热词已启用，会用于转写和整理` : '有独特的人名、产品名或专业术语？让 Notle 认识它们。'}</span><button class="text-button" id="manage-hotwords">管理热词 ${icon('arrow')}</button></div>
   <section class="result-section" aria-labelledby="result-title"><div class="result-heading"><div><span class="section-number">02</span><h2 id="result-title">让文字，清晰一点</h2></div>${selected ? `<span class="result-meta">${isDemo ? '示例内容 · 未调用 AI' : '已保存到转写记录'}</span>` : '<button id="demo-button" class="text-button">体验一段示例 '+icon('arrow')+'</button>'}</div><div id="result-content">${resultHTML()}</div></section>`;
 }
 function resultHTML() {
@@ -148,6 +141,7 @@ function updateRecording() {
   document.querySelectorAll<HTMLButtonElement>('[data-style]').forEach(element => { element.disabled = busy; });
 }
 function bindWorkspace() {
+  $('#manage-hotwords').onclick = () => changeView('hotwords');
   $('#record-button').onclick = () => { if (recorder.state === 'recording') recorder.stop(); else void recorder.start(); };
   $('#upload-button').onclick = () => $('#audio-file').click();
   $('#audio-file').onchange = event => {
