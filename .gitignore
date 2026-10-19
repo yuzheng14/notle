@@ -1,0 +1,6 @@
+/target/
+/node_modules/
+/dist/
+/.notle/
+.env
+.DS_Store
