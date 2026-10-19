@@ -1,0 +1,81 @@
+// Reuses an already installed Playwright; never downloads tooling or browsers.
+import { createRequire } from 'node:module';
+import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
+import { mkdir, rm } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const require = createRequire(import.meta.url);
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const artifacts = process.env.NOTLE_QA_ARTIFACTS || '.notle/qa-artifacts';
+await mkdir(artifacts, { recursive: true });
+const provider = createServer(async (request, response) => {
+  let body = ''; for await (const chunk of request) body += chunk;
+  assert.equal(request.headers.authorization, 'Bearer local-test-key');
+  response.setHeader('Content-Type', 'application/json');
+  if (request.url === '/v1/audio/transcriptions') {
+    assert.match(body, /recording|notle/);
+    response.end(JSON.stringify({ text: '嗯，那个，我们下周先做用户访谈，然后整理反馈。周五之前交第一版方案，不要直接开始开发。' }));
+  } else if (request.url === '/v1/chat/completions') {
+    const parsed = JSON.parse(body); assert.match(parsed.messages[1].content, /不要直接开始开发/);
+    response.end(JSON.stringify({ choices: [{ message: { content: '下周先做用户访谈，再整理反馈。\n\n周五之前交第一版方案。不要直接开始开发。' }, finish_reason: 'stop' }] }));
+  } else { response.statusCode = 404; response.end('{}'); }
+});
+await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+const port = provider.address().port;
+const dataDirectory = `.notle/browser-qa-${process.pid}`;
+const app = spawn('target/debug/notle', { env: { ...process.env, NOTLE_PORT: '3001', NOTLE_DATA_DIR: dataDirectory }, stdio: 'pipe' });
+let browser;
+try {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    try { if ((await fetch('http://127.0.0.1:3001/api/state')).ok) break; } catch {}
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  browser = await chromium.launch({ headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 980 }, permissions: ['microphone', 'clipboard-read', 'clipboard-write'] });
+  const page = await context.newPage();
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  await page.goto('http://localhost:3001');
+  await page.getByRole('heading', { name: '说出来，就有条理。' }).waitFor();
+  await page.screenshot({ path: `${artifacts}/workspace.png`, fullPage: true });
+  await page.getByRole('button', { name: '体验一段示例' }).click();
+  assert.match(await page.getByLabel('整理结果，可编辑后复制').inputValue(), /不用急着开发/);
+  await page.screenshot({ path: `${artifacts}/comparison.png`, fullPage: true });
+  await page.getByRole('button', { name: 'AI 设置' }).click();
+  await page.getByLabel('API 地址').fill(`http://127.0.0.1:${port}/v1`);
+  await page.getByLabel('API Key').fill('local-test-key');
+  await page.getByRole('button', { name: '保存设置' }).click();
+  assert.ok(!(await page.evaluate(() => localStorage.getItem('notle.preferences'))).includes('local-test-key'));
+  await page.getByRole('button', { name: '开始录音', exact: true }).click();
+  await page.getByRole('button', { name: '停止录音', exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelector('#recording-time').textContent !== '00:00');
+  await page.screenshot({ path: `${artifacts}/recording.png`, fullPage: true });
+  await page.getByRole('button', { name: '停止录音', exact: true }).click();
+  await page.getByLabel('录音回放').waitFor();
+  await page.getByRole('button', { name: '转写并整理', exact: true }).click();
+  await page.getByText('已保存到转写记录').waitFor();
+  assert.match(await page.getByLabel('原始转写').inputValue(), /嗯，那个/);
+  assert.match(await page.getByLabel('整理结果，可编辑后复制').inputValue(), /不要直接开始开发/);
+  await page.getByRole('button', { name: '复制', exact: true }).click();
+  assert.match(await page.evaluate(() => navigator.clipboard.readText()), /不要直接开始开发/);
+  await page.getByRole('button', { name: '转写记录' }).click();
+  await page.getByLabel('搜索转写记录').fill('不存在的关键词');
+  await page.getByRole('heading', { name: '还没有找到匹配的文字' }).waitFor();
+  await page.getByLabel('搜索转写记录').fill('用户访谈');
+  await page.locator('.history-open').click();
+  await page.getByRole('button', { name: '重新整理', exact: true }).click();
+  await page.getByText('已按当前风格重新整理。').waitFor();
+  await page.screenshot({ path: `${artifacts}/transcribed.png`, fullPage: true });
+  await page.reload();
+  await page.getByRole('button', { name: 'AI 设置' }).click();
+  assert.equal(await page.getByLabel('API Key').inputValue(), '');
+  await page.getByRole('button', { name: '关闭 AI 设置' }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: `${artifacts}/mobile.png`, fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  assert.deepEqual(errors, []);
+  console.log('PASS: real browser MediaRecorder, audio preview, Rust upload → stub provider → saved result, rewrite, copy, history search, key privacy, mobile layout.');
+} finally {
+  await browser?.close(); app.kill('SIGTERM');
+  await new Promise(resolve => provider.close(resolve));
+  await rm(dataDirectory, { recursive: true, force: true });
+}
