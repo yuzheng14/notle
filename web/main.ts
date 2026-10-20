@@ -1,10 +1,11 @@
 import './style.css';
-import type { ApiConfig, AudioTake, Database, NoteRecord, Style } from './types';
+import type { AudioTake, Database, NoteRecord, Style } from './types';
 import { loadState, transcribe, rewrite, deleteRecord } from './api';
 import { Recorder } from './recorder';
 
 import { icon, escapeHTML } from './ui';
 import { renderHotwords } from './hotwords';
+import { AISettings, settingsHTML } from './settings';
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
 const formatTime = (ms: number) => `${String(Math.floor(ms / 60000)).padStart(2, '0')}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
@@ -18,13 +19,6 @@ let busy = false;
 let isDemo = false;
 let elapsed = 0;
 let serverError = '';
-const defaults: ApiConfig = { baseUrl: 'https://api.openai.com/v1', apiKey: '', transcriptionModel: 'whisper-1', rewriteModel: 'gpt-4o-mini', language: 'zh' };
-let config = { ...defaults };
-try {
-  const saved = JSON.parse(localStorage.getItem('notle.preferences') || '{}') as Partial<ApiConfig>;
-  for (const key of ['baseUrl', 'transcriptionModel', 'rewriteModel', 'language'] as const) if (typeof saved[key] === 'string') config[key] = saved[key];
-} catch { /* Storage may be unavailable; defaults still work. */ }
-
 const recorder = new Recorder((_, time) => { elapsed = time; updateRecording(); }, audio => { if (take) URL.revokeObjectURL(take.url); take = audio; selected = undefined; isDemo = false; renderContent(); }, message => toast(message, true), levels => {
   document.querySelectorAll<HTMLElement>('.wave-bar').forEach((bar, index) => { bar.style.height = `${5 + (levels[index] || 0) * 39}px`; });
 });
@@ -46,19 +40,9 @@ $('#app').innerHTML = `
     <footer class="page-footer"><span>把说出口的想法，变成值得留下的文字。</span><span>BUILT FOR YOUR FLOW <span class="tiny-wave">▂▆▃▇▂</span></span></footer>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
-    <form id="settings-form">
-      <div class="dialog-heading"><div><div class="eyebrow">MAKE IT YOURS</div><h2 id="settings-title">连接你的 AI</h2></div><button type="button" class="icon-button" id="settings-close" aria-label="关闭 AI 设置">${icon('close')}</button></div>
-      <p class="muted">使用同时支持语音转写和文字生成的 OpenAI 兼容服务。</p>
-      <label>API 地址<input name="baseUrl" type="url" required placeholder="https://api.openai.com/v1" spellcheck="false" /></label>
-      <label>API Key<input name="apiKey" type="password" required placeholder="输入你的 API Key" autocomplete="off" maxlength="4096" /></label>
-      <div class="settings-grid"><label>转写模型<input name="transcriptionModel" required maxlength="120" placeholder="whisper-1" spellcheck="false" /></label><label>整理模型<input name="rewriteModel" required maxlength="120" placeholder="gpt-4o-mini" spellcheck="false" /></label></div>
-      <label>识别语言<select name="language"><option value="zh">中文</option><option value="">自动识别</option><option value="en">English</option><option value="ja">日本語</option><option value="ko">한국어</option></select></label>
-      <div class="privacy-note">${icon('shield')}<p>API Key 仅在当前页面内存中使用，刷新后需重新填写。提交转写时，录音和文字将发送至你配置的服务；配置热词后也会一同发送。</p></div>
-      <div id="settings-error" class="inline-error" role="alert" hidden></div>
-      <div class="dialog-actions"><button type="button" class="button secondary" id="settings-cancel">取消</button><button type="submit" class="button primary">保存设置 ${icon('arrow')}</button></div>
-    </form>
-  </dialog>`;
+  ${settingsHTML}`;
+
+const settings = new AISettings(updateConfig, toast);
 
 let toastTimer: number | undefined;
 export function toast(message: string, error = false) {
@@ -70,29 +54,12 @@ $('#nav-workspace').onclick = () => changeView('workspace');
 $('#nav-history').onclick = () => changeView('history');
 $('#nav-hotwords').onclick = () => changeView('hotwords');
 $('.brand').onclick = event => { event.preventDefault(); changeView('workspace'); };
-function openSettings() {
-  const form = $('#settings-form') as HTMLFormElement;
-  for (const [key, value] of Object.entries(config)) (form.elements.namedItem(key) as HTMLInputElement).value = value;
-  $('#settings-error').hidden = true; ($('#settings-dialog') as HTMLDialogElement).showModal();
+function updateConfig() {
+  const ready = settings.ready();
+  $('#config-dot').classList.toggle('ready', ready); $('#config-dot').title = ready ? settings.label : '尚未填写服务密钥';
+  document.querySelector('.intro-note .status-dot')?.classList.toggle('ready', ready);
+  const hint = document.querySelector('#config-hint'); if (hint) hint.textContent = ready ? settings.label : '首次使用，请先在右上角连接你的 AI';
 }
-$('#settings-open').onclick = openSettings;
-for (const id of ['#settings-close', '#settings-cancel']) $(id).onclick = () => ($('#settings-dialog') as HTMLDialogElement).close();
-$('#settings-form').onsubmit = event => {
-  event.preventDefault();
-  const form = new FormData(event.currentTarget as HTMLFormElement);
-  const next = Object.fromEntries(form.entries()) as unknown as ApiConfig;
-  for (const key of Object.keys(next) as (keyof ApiConfig)[]) next[key] = next[key].trim();
-  try {
-    const url = new URL(next.baseUrl);
-    if (!(url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) || url.username || url.password || url.search || url.hash) throw new Error();
-  } catch { $('#settings-error').textContent = '请填写 HTTPS API 地址。本机服务可以使用 HTTP；地址中不能包含账号、查询参数或片段。'; $('#settings-error').hidden = false; return; }
-  config = next;
-  const { apiKey: _secret, ...preferences } = config;
-  try { localStorage.setItem('notle.preferences', JSON.stringify(preferences)); } catch { toast('设置已用于当前页面，浏览器未允许保存偏好。', true); }
-  ($('#settings-dialog') as HTMLDialogElement).close(); updateConfig(); toast('AI 设置已保存，可以开始转写。');
-};
-function updateConfig() { $('#config-dot').classList.toggle('ready', !!config.apiKey); $('#config-dot').title = config.apiKey ? '已填写 API Key' : '尚未填写 API Key'; const hint = document.querySelector('#config-hint'); if (hint) hint.textContent = config.apiKey ? 'AI 已配置，准备好接住你的想法' : '首次使用，请先在右上角连接你的 AI'; }
-function requireConfig(): boolean { if (config.apiKey) return true; openSettings(); return false; }
 
 function renderContent() {
   $('#page-title').textContent = view === 'workspace' ? '录音工作台' : view === 'history' ? '转写记录' : '热词词典';
@@ -108,7 +75,7 @@ function renderContent() {
   updateConfig(); updateRecording();
 }
 function workspaceHTML() {
-  return `<section class="intro"><div><div class="eyebrow"><span class="small-line"></span> FROM VOICE TO CLARITY</div><h1>说出来，<span>就有条理。</span></h1><p>思绪尽管自由，文字交给 Notle。</p></div><div class="intro-note"><span class="status-dot ${config.apiKey ? 'ready' : ''}"></span><span id="config-hint"></span></div></section>
+  return `<section class="intro"><div><div class="eyebrow"><span class="small-line"></span> FROM VOICE TO CLARITY</div><h1>说出来，<span>就有条理。</span></h1><p>思绪尽管自由，文字交给 Notle。</p></div><div class="intro-note"><span class="status-dot ${settings.ready() ? 'ready' : ''}"></span><span id="config-hint"></span></div></section>
   ${serverError ? `<div class="connection-error" role="alert">${escapeHTML(serverError)} <button id="retry-connection">重新连接</button></div>` : ''}
   <section class="recording-card" aria-labelledby="recording-title">
     <div class="card-top"><div><span class="section-number">01</span><h2 id="recording-title">录下此刻的想法</h2></div><span class="chip">${icon('mic')} 录音后转写</span></div>
@@ -117,7 +84,7 @@ function workspaceHTML() {
     <div class="recording-bottom"><span>每段最长 10 分钟 · 最大 25 MB</span><button id="upload-button" class="text-button">${icon('upload')} 导入音频</button><input id="audio-file" type="file" accept="audio/*,video/webm,video/mp4,.m4a" hidden /></div>
   </section>
   <section class="flow-controls"><div><div class="control-label">整理成你需要的样子</div><div class="style-options" role="group" aria-label="整理风格">${Object.entries(styles).map(([value, label]) => `<button data-style="${value}" class="style-option ${style === value ? 'selected' : ''}" aria-pressed="${style === value}">${value === 'natural' ? icon('sparkle') : value === 'paragraphs' ? icon('file') : '<span class="list-icon">☷</span>'}${label}</button>`).join('')}</div></div><button id="process-button" class="button primary process-button" ${!take || busy ? 'disabled' : ''}>${icon('sparkle')}<span>${busy ? '正在转写并整理…' : '转写并整理'}</span>${icon('arrow')}</button></section>
-  <div class="hotword-hint">${icon('book')}<span>${database.hotwords.some(word => word.enabled) ? `${database.hotwords.filter(word => word.enabled).length} 个热词已启用，会用于转写和整理` : '有独特的人名、产品名或专业术语？让 Notle 认识它们。'}</span><button class="text-button" id="manage-hotwords">管理热词 ${icon('arrow')}</button></div>
+  <div class="hotword-hint">${icon('book')}<span>${database.hotwords.some(word => word.enabled) ? `${database.hotwords.filter(word => word.enabled).length} 个热词已启用，会用于整理；豆包同时用于识别` : '有独特的人名、产品名或专业术语？让 Notle 认识它们。'}</span><button class="text-button" id="manage-hotwords">管理热词 ${icon('arrow')}</button></div>
   <section class="result-section" aria-labelledby="result-title"><div class="result-heading"><div><span class="section-number">02</span><h2 id="result-title">让文字，清晰一点</h2></div>${selected ? `<span class="result-meta">${isDemo ? '示例内容 · 未调用 AI' : '已保存到转写记录'}</span>` : '<button id="demo-button" class="text-button">体验一段示例 '+icon('arrow')+'</button>'}</div><div id="result-content">${resultHTML()}</div></section>`;
 }
 function resultHTML() {
@@ -156,17 +123,17 @@ function bindWorkspace() {
   };
   document.querySelectorAll<HTMLButtonElement>('[data-style]').forEach(button => { button.onclick = () => { style = button.dataset.style as Style; document.querySelectorAll<HTMLButtonElement>('[data-style]').forEach(item => { item.classList.toggle('selected', item === button); item.setAttribute('aria-pressed', String(item === button)); }); }; });
   $('#process-button').onclick = async () => {
-    if (!take || busy || !requireConfig()) return;
+    if (!take || busy || !settings.require()) return;
     busy = true; renderContent();
-    try { selected = await transcribe(take, { ...config }, style); isDemo = false; await refreshState(); toast(selected.warning ? '转写已完成，整理需要重试。' : '整理好了，你的想法已成为文字。', !!selected.warning); }
+    try { selected = await transcribe(take, settings.config, style); isDemo = false; await refreshState(); toast(selected.warning ? '转写已完成，整理需要重试。' : '整理好了，你的想法已成为文字。', !!selected.warning); }
     catch (error) { toast(messageOf(error), true); }
     finally { busy = false; renderContent(); if (selected) $('#result-title').scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
   };
   const demo = document.querySelector<HTMLButtonElement>('#demo-button'); if (demo) demo.onclick = () => { selected = { id: 'demo', createdAt: Date.now(), durationMs: 0, original: '嗯，我想说的是，那个，我们下周需要先做用户访谈，然后就是，嗯，把反馈整理一下。对了，记得周五之前给出第一版方案，不用急着开发，先确认方向。', polished: '下周先做用户访谈，再整理反馈。\n\n周五之前给出第一版方案。先确认方向，不用急着开发。', style: 'paragraphs', warning: null }; isDemo = true; renderContent(); };
   const retry = document.querySelector<HTMLButtonElement>('#rewrite-button'); if (retry) retry.onclick = async () => {
-    if (!selected || isDemo || busy || !requireConfig()) return;
+    if (!selected || isDemo || busy || !settings.require(true)) return;
     busy = true; renderContent();
-    try { selected = await rewrite(selected.id, { ...config }, style); await refreshState(); toast('已按当前风格重新整理。'); } catch (error) { toast(messageOf(error), true); } finally { busy = false; renderContent(); }
+    try { selected = await rewrite(selected.id, settings.config.rewrite, style); await refreshState(); toast('已按当前风格重新整理。'); } catch (error) { toast(messageOf(error), true); } finally { busy = false; renderContent(); }
   };
   const copy = document.querySelector<HTMLButtonElement>('#copy-result'); if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText($('#polished-text') instanceof HTMLTextAreaElement ? ($('#polished-text') as HTMLTextAreaElement).value : ''); toast('已复制，可以去任何地方粘贴。'); } catch { ($('#polished-text') as HTMLTextAreaElement).select(); toast('浏览器未允许复制，文字已选中，请手动复制。', true); } };
   const exported = document.querySelector<HTMLButtonElement>('#export-result'); if (exported) exported.onclick = () => download(new Blob([($('#polished-text') as HTMLTextAreaElement).value], { type: 'text/plain;charset=utf-8' }), 'notle-notes.txt');
