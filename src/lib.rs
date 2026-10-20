@@ -1,3 +1,5 @@
+pub mod access;
+pub mod config;
 pub mod error;
 pub mod hotwords;
 pub mod model;
@@ -35,6 +37,7 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState, web_root: PathBuf, allowed_origins: Vec<String>) -> Router {
+    let host_origins = allowed_origins.clone();
     let api = Router::new()
         .route("/state", get(snapshot))
         .route("/hotwords", post(create_hotword))
@@ -72,27 +75,22 @@ pub fn router(state: AppState, web_root: PathBuf, allowed_origins: Vec<String>) 
         .nest("/api", api)
         .fallback_service(ServeDir::new(web_root))
         .with_state(state)
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(move |request: Request, next: Next| {
+            security_headers(request, next, host_origins.clone())
+        }))
 }
-async fn security_headers(request: Request, next: Next) -> Response {
-    // This is a local personal service. Reject foreign Host headers as well as
-    // foreign Origins so a rebinding domain cannot read local history/hotwords.
-    let local_host = request
+async fn security_headers(request: Request, next: Next, allowed_origins: Vec<String>) -> Response {
+    // A tunnel must pass both the configured Host and browser Origin checks.
+    // Forwarded headers do not grant access to an otherwise untrusted host.
+    let allowed_host = request
         .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .and_then(|host| reqwest::Url::parse(&format!("http://{host}")).ok())
-        .is_some_and(|url| {
-            matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
-                && url.path() == "/"
-                && url.query().is_none()
-                && url.username().is_empty()
-                && url.password().is_none()
-        });
-    if !local_host {
+        .is_some_and(|host| access::allows_host(host, &allowed_origins));
+    if !allowed_host {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error":"仅允许通过 localhost 或 127.0.0.1 访问。"})),
+            Json(serde_json::json!({"error":"该域名不在允许的访问范围内。"})),
         )
             .into_response();
     }

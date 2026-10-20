@@ -1,8 +1,12 @@
-use notle::{AppState, provider::Provider, router, store::Store};
-use std::{path::PathBuf, sync::Arc};
+use notle::{AppState, config::Config, provider::Provider, router, store::Store};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load(Path::new("notle.config.json"))?;
     let port: u16 = std::env::var("NOTLE_PORT")
         .unwrap_or_else(|_| "3000".into())
         .parse()?;
@@ -19,8 +23,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("http://127.0.0.1:{port}"),
         format!("http://localhost:{port}"),
     ];
-    if let Ok(origin) = std::env::var("NOTLE_DEV_ORIGIN") {
-        origins.push(origin);
+    origins.extend(config.allowed_origins);
+    for name in ["NOTLE_ALLOWED_ORIGINS", "NOTLE_DEV_ORIGIN"] {
+        if let Ok(value) = std::env::var(name) {
+            for origin in value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let origin = notle::access::normalize_origin(origin).map_err(|message| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{name}: {message}"),
+                    )
+                })?;
+                if !origins.contains(&origin) {
+                    origins.push(origin);
+                }
+            }
+        }
     }
     println!("Notle is ready at http://localhost:{port}");
     axum::serve(listener, router(state, web_root, origins))

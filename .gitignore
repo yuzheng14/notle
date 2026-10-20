@@ -3,4 +3,5 @@
 /dist/
 /.notle/
 .env
+/notle.config.json
 .DS_Store
