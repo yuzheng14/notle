@@ -1,4 +1,5 @@
-import type { ApiConfig, Database, NoteRecord, AudioTake, Style } from './types';
+import type { ApiConfig, RewriteConfig, Database, NoteRecord, AudioTake, Style } from './types';
+import { prepareAudio } from './audio';
 export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try { response = await fetch(`/api${path}`, { ...options, signal: AbortSignal.timeout(390_000) }); }
@@ -11,13 +12,14 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
   return response.json() as Promise<T>;
 }
 export const loadState = () => request<Database>('/state');
-export function transcribe(take: AudioTake, config: ApiConfig, style: Style): Promise<NoteRecord> {
+export async function transcribe(take: AudioTake, config: ApiConfig, style: Style): Promise<NoteRecord> {
+  const audio = await prepareAudio(take);
   const body = new FormData();
-  body.append('audio', take.blob, take.name);
+  body.append('audio', audio.blob, 'recording.wav');
   body.append('config', JSON.stringify(config));
-  body.append('durationMs', String(Math.round(take.durationMs)));
+  body.append('durationMs', String(audio.durationMs));
   body.append('style', style);
   return request('/transcriptions', { method: 'POST', body });
 }
-export const rewrite = (id: string, config: ApiConfig, style: Style) => request<NoteRecord>(`/records/${encodeURIComponent(id)}/rewrite`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config, style }) });
+export const rewrite = (id: string, config: RewriteConfig, style: Style) => request<NoteRecord>(`/records/${encodeURIComponent(id)}/rewrite`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config, style }) });
 export const deleteRecord = (id: string) => request<void>(`/records/${encodeURIComponent(id)}`, { method: 'DELETE' });
