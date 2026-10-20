@@ -35,6 +35,24 @@ cargo run --locked
 
 ## 开发与验证
 
+### Cloudflare Tunnel 访问
+
+服务仍监听本机 `127.0.0.1:3000`，Tunnel 的上游指向 `http://127.0.0.1:3000`。在项目根目录创建 `notle.config.json`，精确配置外部访问来源：
+
+```json
+{
+  "allowedOrigins": ["https://dev3000.communist.win"]
+}
+```
+
+然后在项目根目录运行 `cargo run --locked`，启动时会自动读取该文件，无需传入环境变量。修改配置后需重启服务；若直接运行已有二进制，先执行 `cargo build --locked`，再运行 `./target/debug/notle`。
+
+多个来源写成数组项。此配置同时允许该来源的 Host 与浏览器 Origin，不需要开放任意域名、跨域 CORS 或修改监听地址。本机 localhost/127.0.0.1 访问保持可用。配置文件不存在时仅允许本机访问；JSON、字段或来源无效时启动会报错，不会静默忽略。实际配置文件已被 Git 忽略，可参考 `notle.config.example.json` 创建本机配置，避免把本机访问范围作为其他安装的默认值。
+
+来源列表不提供登录鉴权；这个单用户工具通过 Tunnel 访问时，可在 Cloudflare Access 限定访问人员。
+
+### 本机开发
+
 前端开发需要两个终端：
 
 ```sh
@@ -65,14 +83,17 @@ PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright node scripts/browser-sm
 
 ## 数据与配置
 
+启动时读取当前工作目录中的 `notle.config.json`，`allowedOrigins` 配置额外允许的 HTTPS 来源。下面两个来源环境变量仍可选用，与文件配置合并去重；日常启动无需设置它们。
+
 - `NOTLE_PORT`：端口，默认 `3000`，仅监听 `127.0.0.1`
 - `NOTLE_DATA_DIR`：数据目录，默认 `.notle`；文字历史保存在 `state.json`
 - `NOTLE_WEB_DIR`：静态资源目录，默认 `dist`
+- `NOTLE_ALLOWED_ORIGINS`：额外允许的 HTTPS 访问来源，逗号分隔，同时用于 Host 与 Origin 校验
 - `NOTLE_DEV_ORIGIN`：额外允许的开发页面来源，必须精确匹配协议、主机和端口
 
 API Key 只存在于当前页面内存和处理请求的服务内存中，不进入磁盘、localStorage 或日志，刷新后需重新填写。API 地址和模型等非敏感偏好保存在 localStorage。音频不落盘，不保留到历史中。文字历史存于运行 Rust 服务的电脑，以单进程串行更新和原子替换写入 JSON；不支持多个服务进程共用同一数据文件。
 
-提交转写时，录音和文字会发送给配置的 AI 服务。需使用 HTTPS API，本机模型服务可用 HTTP；不自动跟随重定向。重要信息仍需核对原文，AI 可能整理错误。第一版为本机个人工具，没有账号、多租户或公网部署支持。
+提交转写时，录音和文字会发送给配置的 AI 服务。需使用 HTTPS API，本机模型服务可用 HTTP；不自动跟随重定向。重要信息仍需核对原文，AI 可能整理错误。第一版为单用户个人工具，没有应用内账号或多租户鉴权；通过 Tunnel 访问的配置见上文。
 
 ## 目录
 
