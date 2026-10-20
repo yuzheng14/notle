@@ -24,12 +24,43 @@ impl Style {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApiConfig {
+    pub transcription: TranscriptionConfig,
+    pub rewrite: RewriteConfig,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(
+    tag = "provider",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum TranscriptionConfig {
+    Mimo {
+        base_url: String,
+        api_key: String,
+        model: String,
+        language: String,
+    },
+    Doubao {
+        base_url: String,
+        #[serde(default)]
+        api_key: String,
+        #[serde(default)]
+        app_id: String,
+        #[serde(default)]
+        access_token: String,
+        resource_id: String,
+        language: String,
+    },
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RewriteConfig {
     pub base_url: String,
     pub api_key: String,
-    pub transcription_model: String,
-    pub rewrite_model: String,
-    #[serde(default)]
-    pub language: String,
+    pub model: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

@@ -15,7 +15,7 @@ use axum::{
     routing::{get, post},
 };
 use error::AppError;
-use model::{ApiConfig, Record, Style, now_ms};
+use model::{ApiConfig, Record, RewriteConfig, Style, now_ms};
 use provider::Provider;
 use serde::Deserialize;
 use std::{
@@ -141,15 +141,11 @@ async fn transcribe(
                     .next()
                     .unwrap_or_default()
                     .to_owned();
-                let extension = match mime.as_str() {
-                    "audio/webm" | "video/webm" => "webm",
-                    "audio/mp4" | "video/mp4" | "audio/x-m4a" => "mp4",
-                    "audio/mpeg" => "mp3",
-                    "audio/wav" | "audio/x-wav" => "wav",
-                    "audio/ogg" => "ogg",
-                    _ => return Err(AppError::bad("支持 WebM、MP4、MP3、WAV 或 OGG 音频。")),
-                };
-                let filename = format!("recording.{extension}");
+                if !matches!(mime.as_str(), "audio/wav" | "audio/x-wav" | "audio/mpeg") {
+                    return Err(AppError::bad(
+                        "转写接口需要 WAV 或 MP3 音频，请在页面中重新提交。",
+                    ));
+                }
                 let bytes = field
                     .bytes()
                     .await
@@ -157,7 +153,7 @@ async fn transcribe(
                 if bytes.is_empty() || bytes.len() > MAX_AUDIO_BYTES {
                     return Err(AppError::bad("音频不能为空且不能超过 25 MB。"));
                 }
-                audio = Some((bytes.to_vec(), mime, filename));
+                audio = Some((bytes.to_vec(), mime));
             }
             "config" => {
                 let value = field
@@ -189,11 +185,14 @@ async fn transcribe(
         }
     }
     let config = config.ok_or_else(|| AppError::bad("缺少 AI 配置。"))?;
-    let (bytes, mime, filename) = audio.ok_or_else(|| AppError::bad("请先录音或上传音频。"))?;
+    let (bytes, mime) = audio.ok_or_else(|| AppError::bad("请先录音或上传音频。"))?;
+    if duration_ms > 600_000 {
+        return Err(AppError::bad("每段音频最长 10 分钟，请分段后重试。"));
+    }
     let hotwords = state.store.snapshot().await.hotwords;
     let original = state
         .provider
-        .transcribe(&config, bytes, &mime, &filename, &hotwords)
+        .transcribe(&config.transcription, &bytes, &mime, &hotwords)
         .await?;
     let mut record = Record {
         id: format!(
@@ -212,7 +211,7 @@ async fn transcribe(
     state.store.save_record(record.clone()).await?;
     match state
         .provider
-        .rewrite(&config, &record.original, style, &hotwords)
+        .rewrite(&config.rewrite, &record.original, style, &hotwords)
         .await
     {
         Ok(text) => record.polished = Some(text),
@@ -226,7 +225,7 @@ async fn transcribe(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RewriteRequest {
-    config: ApiConfig,
+    config: RewriteConfig,
     style: Style,
 }
 async fn rewrite_record(

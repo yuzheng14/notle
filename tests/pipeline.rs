@@ -1,8 +1,4 @@
-use axum::{
-    Json, Router,
-    extract::{Multipart, State},
-    routing::post,
-};
+use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
 use notle::{AppState, model::Record, provider::Provider, router, store::Store};
 use reqwest::{
     Client,
@@ -21,26 +17,32 @@ use std::{
 struct Mock {
     fail: Arc<AtomicBool>,
 }
-async fn transcribe(mut body: Multipart) -> Json<Value> {
-    let mut fields = Vec::new();
-    let mut has_prompt = false;
-    while let Some(field) = body.next_field().await.unwrap() {
-        fields.push(field.name().unwrap().to_owned());
-        if field.name() == Some("prompt") {
-            has_prompt = field.text().await.unwrap().contains("Notle");
-        } else {
-            let _ = field.bytes().await.unwrap();
-        }
-    }
-    assert!(fields.contains(&"file".to_owned()));
-    assert!(fields.contains(&"model".to_owned()));
-    assert!(has_prompt);
-    Json(json!({"text":"嗯，诺特尔今天不开会，下周二再确认 3 个方案。"}))
+async fn transcribe(headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
+    assert_eq!(headers["api-key"], "DO-NOT-LEAK-mimo-key");
+    assert!(headers.get("authorization").is_none());
+    assert_eq!(body["model"], "mimo-v2.5-asr");
+    assert_eq!(body["asr_options"]["language"], "zh");
+    assert_eq!(
+        body["messages"][0]["content"][0]["input_audio"]["data"],
+        "AQID"
+    );
+    assert_eq!(
+        body["messages"][0]["content"][0]["input_audio"]["format"],
+        "wav"
+    );
+    Json(
+        json!({"choices":[{"message":{"content":"嗯，诺特尔今天不开会，下周二再确认 3 个方案。"},"finish_reason":"stop"}]}),
+    )
 }
 async fn rewrite(
     State(mock): State<Mock>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> (axum::http::StatusCode, Json<Value>) {
+    assert_eq!(headers["authorization"], "Bearer DO-NOT-LEAK-deepseek-key");
+    assert!(headers.get("api-key").is_none());
+    assert_eq!(body["model"], "deepseek-flash");
+    assert_eq!(body["thinking"]["type"], "disabled");
     assert!(
         body["messages"][0]["content"]
             .as_str()
@@ -83,8 +85,8 @@ async fn raw_transcript_survives_failed_rewrite_and_can_be_retried() {
     };
     let (upstream, mock_task) = serve(
         Router::new()
-            .route("/v1/audio/transcriptions", post(transcribe))
-            .route("/v1/chat/completions", post(rewrite))
+            .route("/mimo/chat/completions", post(transcribe))
+            .route("/deepseek/chat/completions", post(rewrite))
             .with_state(mock.clone()),
     )
     .await;
@@ -123,13 +125,16 @@ async fn raw_transcript_survives_failed_rewrite_and_can_be_retried() {
         .await
         .unwrap();
     assert_eq!(collision.status(), 400);
-    let config = json!({"baseUrl":format!("{upstream}/v1"),"apiKey":"DO-NOT-LEAK-secret-key","transcriptionModel":"whisper-1","rewriteModel":"mock","language":"zh"});
+    let config = json!({
+        "transcription":{"provider":"mimo","baseUrl":format!("{upstream}/mimo"),"apiKey":"DO-NOT-LEAK-mimo-key","model":"mimo-v2.5-asr","language":"zh"},
+        "rewrite":{"baseUrl":format!("{upstream}/deepseek"),"apiKey":"DO-NOT-LEAK-deepseek-key","model":"deepseek-flash"}
+    });
     let form = Form::new()
         .part(
             "audio",
             Part::bytes(vec![1, 2, 3])
-                .file_name("voice.webm")
-                .mime_str("audio/webm")
+                .file_name("voice.wav")
+                .mime_str("audio/wav")
                 .unwrap(),
         )
         .text("config", config.to_string())
@@ -153,7 +158,7 @@ async fn raw_transcript_survives_failed_rewrite_and_can_be_retried() {
     mock.fail.store(false, Ordering::Relaxed);
     let retry = client
         .post(format!("{base}/api/records/{}/rewrite", record.id))
-        .json(&json!({"config":config,"style":"paragraphs"}))
+        .json(&json!({"config":config["rewrite"],"style":"paragraphs"}))
         .send()
         .await
         .unwrap();
